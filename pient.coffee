@@ -1,5 +1,7 @@
 _ = require '/usr/lib/node_modules/underscore'
 fs = require 'fs'
+colorize = require 'colorize'
+cconsole = colorize.console
 
 Number.prototype.mod = (n) -> ((this%n)+n)%n
 
@@ -12,13 +14,14 @@ class Codel
 
 	isEqual: (other) -> @hue == other.hue and @light == other.light and @black == other.black and @white == other.white
 
-	colour: ->
+	colour: (a) ->
 		if @black
-			"BL"
+			"#black[#{a}]"
 		else if @white
-			"WT"
+			"#white[#{a}]"
 		else
-			"#{@hue}#{@light}"
+			c = "##{["red[","yellow[","green[","cyan[","blue[","magenta["][@hue]}#{a}]"
+			["#italic[#{c}]",c,"#underline[#{c}]"][@light]
 
 parse = (n) -> new Codel {
 	'0 0 0':[0,0,'black'], '255 255 255':[0,0,'white'],
@@ -30,14 +33,16 @@ parse = (n) -> new Codel {
 	'255 192 255':[5,0], '255 0 255':[5,1], '192 0 192':[5,2]
 	}[n.replace(/\s+/g,' ')]...
 
-inst = (a, b) -> [
-	'nop', 'psh', 'pop',
-	'add', 'sub', 'mul',
-	'div', 'mod', 'not',
-	'gth', 'ptr', 'swt',
-	'dup', 'rll', 'inn',
-	'inc', 'otn', 'otc'
-	][(b.hue-a.hue).mod(6)*3 + (b.hue-a.hue)]
+inst = (a, b) ->
+	console.log a.hue, b.hue, a.light, b.light, (b.hue-a.hue).mod(6), (b.light-a.light).mod(3)
+	[
+		'nop', 'psh', 'pop',
+		'add', 'sub', 'mul',
+		'div', 'mod', 'not',
+		'gth', 'ptr', 'swt',
+		'dup', 'rll', 'inn',
+		'inc', 'otn', 'otc'
+	][(b.hue-a.hue).mod(6)*3 + (b.light-a.light).mod(3)]
 
 parse_ppm = (name) ->
 	file = fs.readFileSync(name).toString()
@@ -60,13 +65,14 @@ edge = (list, dp) -> _.max(list, (e) -> e.pos[way(dp)]*dp[way(dp)])
 
 ccmost = (list, cc, way, max) ->
 	maxes = list.filter (e) -> e.pos[way] == max.pos[way]
-	_.max maxes, (e) -> e.pos[way] * cc
+	_.min maxes, (e) -> e.pos[way] * cc
 
 compile = (x, y, data, members, last, dp, cc) ->
 	list = []
-	while true
-		console.log "start", [x,y], list
+	for i in [1 .. 10]
 		c = data.grid[y][x]
+		cconsole.log c.colour("start")
+		cconsole.log last.colour("last"), c, list
 		if not c or c.black
 			if last.white
 				cc = -cc
@@ -81,15 +87,17 @@ compile = (x, y, data, members, last, dp, cc) ->
 			y += dp[1]
 		else
 			if not last.white
-				ins = inst c, last
-				list.push [ins, c.count]
+				ins = inst last, c
+				list.push [ins, last.count]
 				if ins == 'ptr' or ins == 'swt'
 					return {list:list, exits:neighbours(data.grid,x,y)}
 			else
-				list.push ["nop", c.count]
+				list.push ["nop", 0]
 			last = c
-			
+		
+			#console.log members[c.label],	dp, cc, way(dp)
 			max = edge members[c.label], dp
+			#console.log max
 			suc = ccmost members[c.label], cc, way(dp), max
 			[x, y] = suc.pos
 			x += dp[0]
@@ -109,12 +117,12 @@ fill = (data) ->
 			i = data.grid[y][x]
 			w = data.grid[y][x-1]
 			n = (data.grid[y-1] or [])[x]
-			if w and i.isEqual(w)
-				i.label = w.label
-			else if w and n and w.isEqual(n) and w.label != n.label
+			if w and n and i.isEqual(n) and w.isEqual(n) and w.label != n.label
 				pair = [w.label, n.label].sort()
 				i.label = pair[0]
 				equiv.push pair
+			else if w and i.isEqual(w)
+				i.label = w.label
 			else if n and i.isEqual(n)
 				i.label = n.label
 			else
@@ -122,7 +130,7 @@ fill = (data) ->
 				i.label = c
 				members.push []
 			members[i.label].push i
-
+	console.log equiv
 	for e in equiv
 		members[e[0]].push members[e[1]].splice(0)...
 
@@ -138,19 +146,21 @@ data = parse_ppm process.argv[2]
 
 members = fill data
 
-
+console.log data.width, data.height
 for row in data.grid
-	console.log row.map((i) -> i.colour()).join(' ')
+	cconsole.log row.map((i) -> ( i.colour(if i.label > 9 then i.label else "0" + i.label ))).join(' ')
 
+for i in members
+	cconsole.log i[0].colour(i[0].count + " " + i[0].pos) if i[0]
 dp = [1,0]
 cc = -1
 last = new Codel(0,0,'white')
 
 exits = {} for i in members
 
-#first = compile 0, 0, data, members, last, dp, cc
+first = compile 0, 0, data, members, last, dp, cc
 
 console.log "first", first
 
-peval first
+#peval first
 
