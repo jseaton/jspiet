@@ -100,7 +100,7 @@ inst = (a, b) ->
 jsinst = (inst) ->
 	{
 		nop : '/*nop*/',
-		psh :	'stack.push(n)',
+		psh : 'stack.push(n)',
 		pop : 'stack.pop()',
 		add : 'stack.push(stack.pop()+stack.pop())',
 		sub : 'stack.push(-stack.pop()+stack.pop())',
@@ -109,24 +109,27 @@ jsinst = (inst) ->
 		mod : 't=stack.pop();stack.push(stack.pop()%t)',
 		not : 'stack.push(stack.pop() ? 0 : 1)',
 		gth : 'stack.push(stack.pop() <= stack.pop() ? 1 : 0)',
-		ptr : 'console.log("TODO PTR")',
-		swt : 'console.log("TODO SWT")',
-		dup : 'console.log("TODO DUP")',
+		ptr : 'dp = (dp + stack.pop()) % 4',
+		swt : 'cc = stack.pop() % 2 == 0 ? cc : -cc',
+		dup : 'stack.push(stack[stack.length-1])',
 		rll : 'console.log("TODO RLL")',
-		inn : 'console.log("TODO INN")',
-		inc : 'console.log("TODO INC")',
+		inn : 'console.log("TODO INN"); stack.push(7)',
+		inc : 'console.log("TODO INC"); stack.push(104)',
 		otn : 'process.stdout.write(stack.pop())',
 		otc : 'process.stdout.write(String.fromCharCode(stack.pop()))'
 	}[inst]
 
-compilejs = (list) -> "(function(stack,dp,cc) {\n" + list.map((i) -> "\t" + jsinst(i[0]) + ";\tn=" + i[1]).join(";\n") + ";\n})"
+compilejs = (list) -> "(function(stack,n,dp,cc) {\n" + list.map((i) -> "\t" + jsinst(i[0]) + ";\tn=" + i[1]).join(";\n") + ";\n\n\treturn [n,dp,cc];\n})"
 
 neighbours = (grid, x, y) -> ((grid[yi] or [])[xi] for [xi,yi] in [[x-1,y], [x+1,y], [x,y-1], [x,y+1]]).select (e) -> e
 
 rotate = ([x,y]) -> [-y,x]
 
-way = (dp) -> (dp[0] == 0) + 0
-edge = (list, dp) -> _.max(list, (e) -> e.pos[way(dp)]*dp[way(dp)])
+way = (dp) -> dp % 2
+pos = (dp) -> if dp < 2 then 1 else -1
+
+edge = (list, dp) ->
+	_.max list, (e) -> e.pos[way(dp)]*pos(dp)
 
 ccmost = (list, cc, way, max) ->
 	maxes = list.filter (e) -> e.pos[way] == max.pos[way]
@@ -136,85 +139,102 @@ corner = (list, cc, dp) ->
 	max = edge list, dp
 	ccmost list, cc, way(dp), max
 
-compile = (x, y, data, blocks, last, dp, cc) ->
+dpwise = (data, c, dp) ->
+	x = [1,0,-1,0][dp]
+	y = [0,1,0,-1][dp]
+	(data.grid[c.pos[1]+y] or [])[c.pos[0]+x]
+
+nextcodel = (data, list, cc, dp) ->
+	succ = corner list, cc, dp
+	dpwise data, succ, dp
+
+compile = (data, curr, last, dp, cc) ->
+	console.log curr
 	list = []
-	for i in [1 .. 50]
-		c = data.grid[y][x]
-		console.log x,y,c
-		cconsole.log c.colour("colour") if c
-		cconsole.log last.colour("last"), dp, cc, list
-		if not c or c.black
-			if last.white
+	loop
+		cconsole.log curr.colour("colour"), dp, cc, list[list.length-1]
+		
+		if not curr or curr.black
+			throw "INVALID CELL" + curr
+		block = data.blocks[curr.label]
+		if curr.white
+			seen = [curr]
+			precc = cc
+			predp = dp
+			loop
+				curr = edge block.codels.filter((e) -> e.pos[1 - way(dp)] == curr.pos[1 - way(dp)]), dp
+				return {list:list} if _.contains seen, succ
+				next = dpwise data, succ, dp
+				if next and not next.black
+					#TODO: account for cc/dp change in instructions
+					break
 				cc = -cc
-				rotate dp
-			else
-				x -= dp[0]
-				y -= dp[1]
-				cc = -cc
-			continue
-		block = blocks[c.label]
-		if c.white
-			[x,y] = edge(block.codels.filter((e) -> e.pos[1 - way(dp)] == [x,y][1 - way(dp)]), dp).pos
-			x += dp[0]
-			y += dp[1]
+				dp = (dp + 1) % 4
+				seen.push curr
 		else
 			if not last.white
-				ins = inst last, c
-				list.push [ins, c.count]
+				ins = inst last, curr
+				list.push [ins, curr.count]
 			else
-				list.push ["nop", c.count]
+				list.push ["nop", curr.count]
 			block.exits[[dp,cc]] ||= {}
 			block.exits[[dp,cc]].list = new ArraySlice(list)
 			if ins == 'ptr' or ins == 'swt'
-				return {list:list,terminal:block}
-		last = c
+				return {list:list,terminal:curr}
+		last = curr
 		
-		suc = corner block.codels, cc, dp
-		[x, y] = suc.pos
-		x += dp[0]
-		y += dp[1]
-	
-	{list:list,terminal:blocks[0]}
+		count = 0
+		loop
+			succ = corner block.codels, cc, dp
+			curr = dpwise data, succ, dp
+			#curr = nextcodel data, block.codels, dp, cc
+			#TODO: account for cc/dp change in instructions
+			break if curr and not curr.black
+			if count % 2 == 0
+				cc = -cc
+			else
+				dp = (dp + 1) % 4
+			count += 1
+			return {list:list} if count >= 4
 
-
-peval = (data, blocks) ->
-	dp = [1,0]
+peval = (data) ->
+	dp =  0
 	cc = -1
 	last = new Codel(0,0,'white')
 
-	start = compile 0, 0, data, blocks, last, dp, cc
+	start = compile data, data.grid[0][0], last, dp, cc
 	jscode = compilejs start.list
 	console.log jscode
 	
 	f = eval jscode
+	next = start.terminal
 	
 	stack = []
+	n = 0
 	while true
 		console.time 'evaluation'
-		next = f(stack)
+		[n,dp,cc] = f(stack,n,dp,cc)
 		console.timeEnd 'evaluation'
 		return unless next
-		exits = next.exits[[dp,cc]]
+		block = data.blocks[next.label]
+		block.exits[[dp,cc]] ||= {}
+		exits = block.exits[[dp,cc]]
 		if exits.js
 			f = exits.js
 		else
-			compile next.pos[0], next.pos[1], data, blocks, dp, cc if not exits.list
+			unless exits.list
+				succ = corner block.codels, cc, dp
+				curr = dpwise data, succ, dp
+				exits.list = compile data, curr, next, dp, cc
 			jscode = compilejs exits.list
 			f = exits.js = eval jscode
 
 data = parse_ppm process.argv[2]
 
-blocks = ({codels:c,exits:{}} for c in fill(data))
+data.blocks = ({codels:c,exits:{}} for c in fill(data))
 
-console.log blocks
-
-console.log data.width, data.height
 for row in data.grid
 	cconsole.log row.map((i) -> ( i.colour(if i.label > 9 then i.label else "0" + i.label ))).join(' ')
 
-for block in blocks
-	codel = block.codels[0]
-	cconsole.log codel.colour(codel.count + " " + codel.pos) if codel
-
-peval data, blocks
+peval data
 
