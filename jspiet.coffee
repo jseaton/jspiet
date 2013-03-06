@@ -24,12 +24,13 @@ class Codel
 			c = "##{["red[","yellow[","green[","cyan[","blue[","magenta["][@hue]}#{a}]"
 			["#italic[#{c}]",c,"#underline[#{c}]"][@light]
 
-class ArraySlice
-	constructor: (array) ->
-		@array = array
-		@index = array.length - 1
+class SectSlice
+	constructor: (ref,n) ->
+		@ref = ref
+		@index = if n == undefined then @ref.list.length - 1 else 0
 
-	get: -> @array[@index..-1]
+	list: -> @ref.list[@index..-1]
+	terminal: -> @ref.terminal
 
 parse = (n) -> new Codel {
 	'0 0 0':[0,0,'black'], '255 255 255':[0,0,'white'],
@@ -87,7 +88,6 @@ fill = (data) ->
 	members
 
 inst = (a, b) ->
-	console.log a.hue, b.hue, a.light, b.light, (b.hue-a.hue).mod(6), (b.light-a.light).mod(3)
 	[
 		'nop', 'psh', 'pop',
 		'add', 'sub', 'mul',
@@ -115,11 +115,11 @@ jsinst = (inst) ->
 		rll : 'console.log("TODO RLL")',
 		inn : 'console.log("TODO INN"); stack.push(7)',
 		inc : 'console.log("TODO INC"); stack.push(104)',
-		otn : 'process.stdout.write(stack.pop())',
+		otn : 'process.stdout.write("============"+stack.pop().toString()+"===========\\n")',
 		otc : 'process.stdout.write(String.fromCharCode(stack.pop()))'
 	}[inst]
 
-compilejs = (list) -> "(function(stack,n,dp,cc) {\n" + list.map((i) -> "\t" + jsinst(i[0]) + ";\tn=" + i[1]).join(";\n") + ";\n\n\treturn [n,dp,cc];\n})"
+compilejs = (list) -> "(function(stack,n,dp,cc) {\n" + list.map((i) -> "\t" + jsinst(i[0]) + ";\n\tn=" + i[1]).join(";\n") + ";\n\n\treturn [n,dp,cc];\n})"
 
 neighbours = (grid, x, y) -> ((grid[yi] or [])[xi] for [xi,yi] in [[x-1,y], [x+1,y], [x,y-1], [x,y+1]]).select (e) -> e
 
@@ -149,53 +149,73 @@ nextcodel = (data, list, cc, dp) ->
 	dpwise data, succ, dp
 
 compile = (data, curr, last, dp, cc) ->
-	console.log curr
-	list = []
+	sect = {list:[]}
 	loop
-		cconsole.log curr.colour("colour"), dp, cc, list[list.length-1]
+		#cconsole.log curr.colour("loop" + curr.pos), dp, cc, sect.list
 		
 		if not curr or curr.black
 			throw "INVALID CELL" + curr
 		block = data.blocks[curr.label]
+		if block.exits[[dp,cc]]
+			sect.terminal = curr
+			return new SectSlice sect, 0
 		if curr.white
-			seen = [curr]
+			seen = []
 			precc = cc
 			predp = dp
+			succ = curr
+			last = curr
 			loop
-				curr = edge block.codels.filter((e) -> e.pos[1 - way(dp)] == curr.pos[1 - way(dp)]), dp
-				return {list:list} if _.contains seen, succ
-				next = dpwise data, succ, dp
-				if next and not next.black
+				#console.log "curr", way(dp), curr.pos
+				while cand = dpwise(data, succ, dp) and cand and cand.label == succ.label
+					succ = cand
+				#console.log succ
+				#return {list:list} if _.contains seen, succ
+				curr = dpwise data, succ, dp
+				if curr and not curr.black
+					#console.log "breaking", curr.pos
 					#TODO: account for cc/dp change in instructions
 					break
 				cc = -cc
+				sect.list.push ["psh", 1]
+				sect.list.push ["swt", 1]
+				
 				dp = (dp + 1) % 4
-				seen.push curr
+				sect.list.push ["psh", 1]
+				sect.list.push ["ptr", 1]
+				
+				seen.push succ
 		else
 			if not last.white
 				ins = inst last, curr
-				list.push [ins, curr.count]
+				sect.list.push [ins, curr.count]
 			else
-				list.push ["nop", curr.count]
-			block.exits[[dp,cc]] ||= {}
-			block.exits[[dp,cc]].list = new ArraySlice(list)
+				sect.list.push ["nop", curr.count]
+			block.exits[[dp,cc]] = new SectSlice sect
 			if ins == 'ptr' or ins == 'swt'
-				return {list:list,terminal:curr}
-		last = curr
+				sect.terminal = curr
+				return new SectSlice sect, 0
+			last = curr
 		
-		count = 0
-		loop
-			succ = corner block.codels, cc, dp
-			curr = dpwise data, succ, dp
-			#curr = nextcodel data, block.codels, dp, cc
-			#TODO: account for cc/dp change in instructions
-			break if curr and not curr.black
-			if count % 2 == 0
-				cc = -cc
-			else
-				dp = (dp + 1) % 4
-			count += 1
-			return {list:list} if count >= 4
+			count = 0
+			loop
+				#console.log "from", curr
+				succ = corner block.codels, cc, dp
+				curr = dpwise data, succ, dp
+				#console.log "next", curr
+				#curr = nextcodel data, block.codels, dp, cc
+				#TODO: account for cc/dp change in instructions
+				break if curr and not curr.black
+				if count % 2 == 0
+					cc = -cc
+					sect.list.push ["psh", 1]
+					sect.list.push ["swt", 1]
+				else
+					dp = (dp + 1) % 4
+					sect.list.push ["psh", 1]
+					sect.list.push ["ptr", 1]
+				count += 1
+				return new SectSlice(sect, 0) if count >= 4
 
 peval = (data) ->
 	dp =  0
@@ -203,38 +223,44 @@ peval = (data) ->
 	last = new Codel(0,0,'white')
 
 	start = compile data, data.grid[0][0], last, dp, cc
-	jscode = compilejs start.list
+	jscode = compilejs start.list()
 	console.log jscode
 	
 	f = eval jscode
-	next = start.terminal
+	terminal = start.terminal()
 	
 	stack = []
 	n = 0
 	while true
-		console.time 'evaluation'
+		#console.time 'evaluation'
+		console.log "stack", stack
 		[n,dp,cc] = f(stack,n,dp,cc)
-		console.timeEnd 'evaluation'
-		return unless next
-		block = data.blocks[next.label]
+		#console.timeEnd 'evaluation'
+		#console.log terminal
+		return unless terminal
+		block = data.blocks[terminal.label]
 		block.exits[[dp,cc]] ||= {}
 		exits = block.exits[[dp,cc]]
 		if exits.js
 			f = exits.js
 		else
 			unless exits.list
+				#console.log "doin", block
 				succ = corner block.codels, cc, dp
 				curr = dpwise data, succ, dp
-				exits.list = compile data, curr, next, dp, cc
-			jscode = compilejs exits.list
+				#console.log "goin", curr
+				exits = compile data, curr, terminal, dp, cc
+			jscode = compilejs exits.list()
+			console.log jscode
 			f = exits.js = eval jscode
+		terminal = exits.terminal()
 
 data = parse_ppm process.argv[2]
 
 data.blocks = ({codels:c,exits:{}} for c in fill(data))
 
-for row in data.grid
-	cconsole.log row.map((i) -> ( i.colour(if i.label > 9 then i.label else "0" + i.label ))).join(' ')
+#for row in data.grid
+#	cconsole.log row.map((i) -> ( i.colour(if i.label > 9 then i.label else "0" + i.label ))).join(' ')
 
 peval data
 
