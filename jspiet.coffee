@@ -39,7 +39,7 @@ class SectSlice
 	js: ->
 		if @jsc == undefined
 			source = compilejs(this.list())
-			#console.log source
+			debug source
 			@jsc = eval source
 		@jsc
 
@@ -51,14 +51,13 @@ class Block
 
 	exit: (dp,cc) ->
 		if not @exits[[dp,cc]]
-			debug "#red[generating]", dp, cc
 			[next, app] = findexit data, this, dp, cc
 			
 			#TODO ugly
 			slice =  compile @data, next, @codels[0], dp, cc
 			@exits[[dp,cc]] = new SectSlice data, {list:app, terminal:slice.terminal()}
 			@exits[[dp,cc]].next = slice
-		debug "exits", _.map(@exits, (e,k) -> [k,e.list().map((f) -> f.toString()).join(' ')])
+			debug "list", @exits[[dp,cc]].list()
 		
 		@exits[[dp,cc]]
 
@@ -143,7 +142,7 @@ inst = (a, b) ->
 jsinst = (inst) ->
 	{
 		nop : '/*nop*/',
-		psh : 'stack.push(n)',
+		psh : "stack.push(#{inst[1]})",
 		pop : 'stack.pop()',
 		add : 'stack.push(stack.pop()+stack.pop())',
 		sub : 'stack.push(-stack.pop()+stack.pop())',
@@ -155,14 +154,14 @@ jsinst = (inst) ->
 		ptr : 'dp = (dp + stack.pop()) % 4',
 		swt : 'cc = stack.pop() % 2 == 0 ? cc : -cc',
 		dup : 'stack.push(stack.stack[stack.stack.length-1])',
-		rll : 't=stack.pop();d=stack.pop();for(var i=0;i<t;i++) {stack.stack.splice(d,0,stack.pop());}',
+		rll : 't=stack.pop();d=stack.pop();for(var i=0;i<t;i++) {stack.stack.splice(stack.stack.length-d,0,stack.pop());}',
 		inn : 'console.log("TODO INN"); stack.push(7)',
 		inc : 'console.log("TODO INC"); stack.push(104)',
 		otn : 'process.stdout.write(stack.pop().toString()); debug("===================\\n")',
 		otc : 'process.stdout.write(String.fromCharCode(stack.pop()))'
-	}[inst]
+	}[inst[0]]
 
-compilejs = (list) -> "(function(stack,n,dp,cc) {\n" + list.map((i) -> "\t\t\t\tdebug('" + i + "',n,dp,cc > 0 ? ' '+cc : ''+cc,stack);\n\t" + jsinst(i[0]) + ";\n\tn=" + i[1]).join(";\n") + ";\n\n\treturn [n,dp,cc];\n})"
+compilejs = (list) -> "(function(stack,dp,cc) {\n" + list.map((i) -> "\t\t\t\tdebug('" + i + "',dp,cc > 0 ? ' '+cc : ''+cc,stack);\n\t" + jsinst(i)).join(";\n") + ";\n\n\treturn [dp,cc];\n})"
 
 neighbours = (grid, x, y) -> ((grid[yi] or [])[xi] for [xi,yi] in [[x-1,y], [x+1,y], [x,y-1], [x,y+1]]).select (e) -> e
 
@@ -170,17 +169,18 @@ rotate = ([x,y]) -> [-y,x]
 
 way = (dp) -> dp % 2
 pos = (dp) -> if dp < 2 then 1 else -1
+sgn = (dp) -> if way(dp) then -1 else 1
 
 edge = (list, dp) ->
 	_.max list, (e) -> e.pos[way(dp)]*pos(dp)
 
-ccmost = (list, cc, way, max) ->
-	maxes = list.filter (e) -> e.pos[way] == max.pos[way]
-	_.max maxes, (e) -> e.pos[1-way] * cc
+ccmost = (list, dp, cc, max) ->
+	maxes = list.filter (e) -> e.pos[way(dp)] == max.pos[way(dp)]
+	_.max maxes, (e) -> e.pos[1-way(dp)] * cc * sgn(dp)
 
-corner = (list, cc, dp) ->
+corner = (list, dp, cc) ->
 	max = edge list, dp
-	ccmost list, cc, way(dp), max
+	ccmost list, dp, cc, max
 
 dpwise = (data, c, dp) ->
 	x = [1,0,-1,0][dp]
@@ -190,8 +190,8 @@ dpwise = (data, c, dp) ->
 findexit = (data, block, dp, cc) ->
 	list = []
 	count = 0
-	for count in [0..4]
-		succ = corner block.codels, cc, dp
+	for count in [0..8]
+		succ = corner block.codels, dp, cc
 		curr = dpwise data, succ, dp
 		return [curr,list,dp,cc] if curr and not curr.black
 		if count % 2 == 0
@@ -243,9 +243,9 @@ compile = (data, curr, last, dp, cc) ->
 		else
 			if not last.white
 				ins = inst last, curr
-				sect.list.push [ins, curr.count]
+				sect.list.push [ins, last.count]
 			else
-				sect.list.push ["nop", curr.count]
+				sect.list.push ["nop"]
 			if ins == 'ptr' or ins == 'swt'
 				sect.terminal = curr
 				return new SectSlice(data, sect, 0)
@@ -262,18 +262,15 @@ peval = (data) ->
 	last = new Codel(0,0,'white')
 
 	curr = compile data, data.grid[0][0], last, dp, cc
-	#console.log "list", curr.list()#.filter((e) -> not e[2])
+	debug "list", curr.list()
 	
 	stack = new Stack()
-	n = 0
 	while true
 		#console.log "status", stack, dp, cc
-
 		js = curr.js()
-		debug "pre", stack, n, dp, cc
-		debug curr.list(), curr.terminal()
-		[n,dp,cc] = curr.js()(stack, n, dp, cc)
-		debug "post", stack, n, dp, cc
+		debug "pre", stack, dp, cc
+		[dp,cc] = curr.js()(stack, dp, cc)
+		debug "post", stack, dp, cc
 		
 		return unless curr.terminal()
 		curr = data.blocks[curr.terminal().label].exit dp, cc
