@@ -2,7 +2,7 @@ require 'coffee-trace'
 _ = require 'underscore'
 fs = require 'fs'
 argv = require('optimist').argv
-
+prompt = require 'prompt'
 colorize = require 'colorize'
 cconsole = colorize.console
 
@@ -154,14 +154,24 @@ jsinst = (inst) ->
     ptr : 'dp = (dp + stack.pop()) % 4',
     swt : 'cc = stack.pop() % 2 == 0 ? cc : -cc',
     dup : 'stack.push(stack.stack[stack.stack.length-1])',
-    rll : 't=stack.pop();d=stack.pop();for(var i=0;i<t;i++) {stack.stack.splice(stack.stack.length-d,0,stack.pop());}',
-    inn : 'console.log("TODO INN"); stack.push(7)',
+    rll : 't=stack.pop();d=stack.pop();
+      if (t>=0) {
+        for(var i=0;i<t;i++) { stack.stack.splice(stack.stack.length-d,0,stack.pop()); } 
+      } else { 
+        for (var i=0;i>t;i--) { stack.push(stack.stack.splice(stack.stack.length-d,1)[0]); } 
+      }',
+    inn : 'prompt.get(["input"], function (err, result) {
+        if (err) { return 1; }
+        stack.push(parseInt(result.input));
+        peval(data,stack,data.blocks[curr.terminal().label].exit(dp,cc),dp,cc);
+      });
+      return;',
     inc : 'console.log("TODO INC"); stack.push(104)',
     otn : 'process.stdout.write(stack.pop().toString()); debug("===================\\n")',
     otc : 'process.stdout.write(String.fromCharCode(stack.pop()))'
   }[inst[0]]
 
-compilejs = (list) -> "(function(stack,dp,cc) {\n" + list.map((i) -> "\t\t\t\tdebug('" + i + "',dp,cc > 0 ? ' '+cc : ''+cc,stack);\n\t" + jsinst(i)).join(";\n") + ";\n\n\treturn [dp,cc];\n})"
+compilejs = (list) -> "(function(data,stack,curr,dp,cc) {\n" + list.map((i) -> "\t\t\t\tdebug('" + i + "',dp,cc > 0 ? ' '+cc : ''+cc,stack);\n\t" + jsinst(i)).join(";\n") + ";\n\n\treturn [dp,cc];\n})"
 
 neighbours = (grid, x, y) -> ((grid[yi] or [])[xi] for [xi,yi] in [[x-1,y], [x+1,y], [x,y-1], [x,y+1]]).select (e) -> e
 
@@ -216,7 +226,7 @@ compile = (data, curr, last, dp, cc) ->
     block = data.blocks[curr.label]
     if block.exits[[dp,cc]]
       sect.terminal = curr
-      return new SectSlice(data, sect, 0)
+      return new SectSlice data, sect, 0
     if curr.white
       seen = []
       succ = curr
@@ -246,17 +256,17 @@ compile = (data, curr, last, dp, cc) ->
         sect.list.push [ins, last.count]
       else
         sect.list.push ["nop"]
-      if ins == 'ptr' or ins == 'swt'
+      if ins == 'ptr' or ins == 'swt' or ins == 'inn'
         sect.terminal = curr
-        return new SectSlice(data, sect, 0)
+        return new SectSlice data, sect, 0
       else
-        block.exits[[dp,cc]] = new SectSlice(data, sect, undefined)
+        block.exits[[dp,cc]] = new SectSlice data, sect
       last = curr
       [curr, app, dp, cc] = findexit data, block, dp, cc
       return new SectSlice(data, sect, 0) unless curr
       sect.list.push app...
 
-peval = (data) ->
+piet_eval = (data) ->
   dp =  0
   cc = -1
   last = new Codel(0,0,'white')
@@ -265,11 +275,18 @@ peval = (data) ->
   debug "list", curr.list()
   
   stack = new Stack()
+
+  prompt.start()
+  peval data, stack, curr, dp, cc
+
+peval = (data, stack, curr, dp, cc) ->
   while true
     #console.log "status", stack, dp, cc
     js = curr.js()
     debug "pre", stack, dp, cc
-    [dp,cc] = curr.js()(stack, dp, cc)
+    ret = curr.js()(data, stack, curr, dp, cc)
+    return unless ret
+    [dp,cc] = ret
     debug "post", stack, dp, cc
     
     return unless curr.terminal()
@@ -283,5 +300,5 @@ data.blocks = (new Block(data, c) for c in fill(data))
 #for row in data.grid
 # cconsole.log row.map((i) -> ( i.colour(if i.label > 9 then i.label else "0" + i.label ))).join(' ')
 
-peval data
+piet_eval data
 
