@@ -3,6 +3,12 @@ jspiet
 
 A Piet to Javascript JIT compiler. Because why not?
 
-Currently very much in progress. It can currently just about cope with some of the examples from npiet, including the Fibonnaci program.
+While something of a work in progress, it can currently quite happily run the demo programs for npiet.
 
-Intended to run on node.js
+To run via node, first install dependencies, then:
+    $ coffee cli.coffee program.ppm
+
+Alternatively jspiet can be used in the browser. First:
+    $ coffee -cb *.coffee
+
+Note that the generated .js files will have to be removed if you want to use node again. I should probably package this properly to avoid this.

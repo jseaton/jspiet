@@ -1,12 +1,13 @@
-require 'coffee-trace'
-_ = require 'underscore'
-fs = require 'fs'
-argv = require('optimist').argv
-prompt = require 'prompt'
-colorize = require 'colorize'
-cconsole = colorize.console
+io    = null
+debug = null
+_ = null unless 'undefined' == typeof module
 
-debug = (n...) -> if argv.debug then cconsole.log(n...) else null
+unless 'undefined' == typeof module
+  _ = require 'underscore'
+  module.exports = exports = (opt) ->
+    io    = opt.io
+    debug = opt.debug
+    {create:create, eval:piet_eval}
 
 Number.prototype.mod = (n) -> ((this%n)+n)%n
 
@@ -36,30 +37,31 @@ class SectSlice
 
   list: -> @ref.list[@index..-1].concat (@next and @next.list() or [])
   terminal: -> @ref.terminal
-  js: ->
-    if @jsc == undefined
-      source = compilejs(this.list())
-      debug source
-      @jsc = eval source
-    @jsc
+  js: (data, stack, curr, dp, cc) ->
+    source = compilejs this.list()
+    debug source
+    @js = eval source
+    @js data, stack, curr, dp, cc
 
 class Block
   constructor: (data, codels) ->
     @data   = data
     @codels = codels
-    @exits  = {}
+    @exits  = []
+    @any    = @codels[0]
 
   exit: (dp,cc) ->
-    if not @exits[[dp,cc]]
-      [next, app] = findexit data, this, dp, cc
+    i = dp*4 + cc
+    if not @exits[i]
+      [next, app] = findexit @data, this, dp, cc
       
       #TODO ugly
-      slice =  compile @data, next, @codels[0], dp, cc
-      @exits[[dp,cc]] = new SectSlice data, {list:app, terminal:slice.terminal()}
-      @exits[[dp,cc]].next = slice
-      debug "list", @exits[[dp,cc]].list()
+      slice =  compile @data, next, @any, dp, cc
+      @exits[i] = new SectSlice @data, {list:app, terminal:slice.terminal()}
+      @exits[i].next = slice
+      debug "list", @exits[i].list()
     
-    @exits[[dp,cc]]
+    @exits[i]
 
 class Stack
   constructor: -> @stack = []
@@ -84,8 +86,7 @@ parse = (n) -> new Codel {
   '255 192 255':[5,0], '255 0 255':[5,1], '192 0 192':[5,2]
   }[n.replace(/\s+/g,' ')]...
 
-parse_ppm = (name) ->
-  file = fs.readFileSync(name).toString()
+parse_ppm = (file) ->
   [width, height] = file.match(/^(\d+) (\d+)$/m).slice(1,3)
   list = file.match(/\d+ +\d+ +\d+/g).map(parse)
   data = []
@@ -160,15 +161,20 @@ jsinst = (inst) ->
       } else { 
         for (var i=0;i>t;i--) { stack.push(stack.stack.splice(stack.stack.length-d,1)[0]); } 
       }',
-    inn : 'prompt.get(["input"], function (err, result) {
+    inn : 'io.get(["input"], function (err, result) {
         if (err) { return 1; }
         stack.push(parseInt(result.input));
-        peval(data,stack,data.blocks[curr.terminal().label].exit(dp,cc),dp,cc);
+        peval(data,stack,curr.terminal().exit(dp,cc),dp,cc);
       });
-      return;',
-    inc : 'console.log("TODO INC"); stack.push(104)',
-    otn : 'process.stdout.write(stack.pop().toString()); debug("===================\\n")',
-    otc : 'process.stdout.write(String.fromCharCode(stack.pop()))'
+      return',
+    inc : 'io.get(["input"], function (err, result) {
+        if (err) { return 1; }
+        stack.push(result.input.charCodeAt(0));
+        peval(data,stack,curr.terminal().exit(dp,cc),dp,cc);
+      });
+      return',
+    otn : 'io.out(stack.pop().toString())',
+    otc : 'io.out(String.fromCharCode(stack.pop()))'
   }[inst[0]]
 
 compilejs = (list) -> "(function(data,stack,curr,dp,cc) {\n" + list.map((i) -> "\t\t\t\tdebug('" + i + "',dp,cc > 0 ? ' '+cc : ''+cc,stack);\n\t" + jsinst(i)).join(";\n") + ";\n\n\treturn [dp,cc];\n})"
@@ -224,8 +230,8 @@ compile = (data, curr, last, dp, cc) ->
     if not curr or curr.black
       throw "INVALID CELL" + curr
     block = data.blocks[curr.label]
-    if block.exits[[dp,cc]]
-      sect.terminal = curr
+    if block.exits[dp*4+cc]
+      sect.terminal = block
       return new SectSlice data, sect, 0
     if curr.white
       seen = []
@@ -257,10 +263,10 @@ compile = (data, curr, last, dp, cc) ->
       else
         sect.list.push ["nop"]
       if ins == 'ptr' or ins == 'swt' or ins == 'inn'
-        sect.terminal = curr
+        sect.terminal = block
         return new SectSlice data, sect, 0
       else
-        block.exits[[dp,cc]] = new SectSlice data, sect
+        block.exits[dp*4+cc] = new SectSlice data, sect
       last = curr
       [curr, app, dp, cc] = findexit data, block, dp, cc
       return new SectSlice(data, sect, 0) unless curr
@@ -276,29 +282,24 @@ piet_eval = (data) ->
   
   stack = new Stack()
 
-  prompt.start()
+  io.start()
   peval data, stack, curr, dp, cc
 
 peval = (data, stack, curr, dp, cc) ->
   while true
-    #console.log "status", stack, dp, cc
-    js = curr.js()
     debug "pre", stack, dp, cc
-    ret = curr.js()(data, stack, curr, dp, cc)
+    ret = curr.js data, stack, curr, dp, cc
     return unless ret
     [dp,cc] = ret
     debug "post", stack, dp, cc
     
-    return unless curr.terminal()
-    curr = data.blocks[curr.terminal().label].exit dp, cc
+    term = curr.terminal()
+    return unless term
+    curr = term.exit dp, cc
     return unless curr
 
-data = parse_ppm argv._[0]
-
-data.blocks = (new Block(data, c) for c in fill(data))
-
-#for row in data.grid
-# cconsole.log row.map((i) -> ( i.colour(if i.label > 9 then i.label else "0" + i.label ))).join(' ')
-
-piet_eval data
+create = (file) ->
+  data = parse_ppm file
+  data.blocks = (new Block(data, c) for c in fill(data))
+  data
 
