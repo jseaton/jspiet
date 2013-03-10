@@ -10,6 +10,10 @@ unless 'undefined' == typeof module
     {create:create, eval:piet_eval}
 
 Number.prototype.mod = (n) -> ((this%n)+n)%n
+String.prototype.format = ->
+  args = arguments
+  this.replace /{(\d+)}/g, (match, number) ->
+    if typeof args[number] isnt 'undefined' then "(#{args[number]})" else match
 
 class Codel
   constructor: (hue, light, bw) ->
@@ -38,8 +42,10 @@ class SectSlice
   list: -> @ref.list[@index..-1].concat (@next and @next.list() or [])
   terminal: -> @ref.terminal
   js: (data, stack, curr, dp, cc) ->
-    source = compilejs this.list()
-    debug source
+    source = compilejs2(@list())
+    console.log "list", @list()
+    console.log "source", compilejs(@list())
+    console.log "source", source
     @js = eval source
     @js data, stack, curr, dp, cc
 
@@ -149,11 +155,13 @@ jsinst = (inst) ->
     sub : 'stack.push(-stack.pop()+stack.pop())',
     mul : 'stack.push(stack.pop()*stack.pop())',
     div : 't=stack.pop();stack.push(stack.pop()/t|0)',
-    mod : 't=stack.pop();stack.push(stack.pop()%t)',
+    mod : 't=stack.pop();stack.push(stack.pop().mod(t))',
     not : 'stack.push(stack.pop() ? 0 : 1)',
     gth : 'stack.push(stack.pop() < stack.pop() ? 1 : 0)',
     ptr : 'dp = (dp + stack.pop()) % 4',
+    ptri: "dp = (dp + #{inst[1]}) % 4",
     swt : 'cc = stack.pop() % 2 == 0 ? cc : -cc',
+    swti: 'cc = -cc',
     dup : 'stack.push(stack.stack[stack.stack.length-1])',
     rll : 't=stack.pop();d=stack.pop();
       if (t>=0) {
@@ -178,6 +186,57 @@ jsinst = (inst) ->
   }[inst[0]]
 
 compilejs = (list) -> "(function(data,stack,curr,dp,cc) {\n" + list.map((i) -> "\t\t\t\tdebug('" + i + "',dp,cc > 0 ? ' '+cc : ''+cc,stack);\n\t" + jsinst(i)).join(";\n") + ";\n\n\treturn [dp,cc];\n})"
+
+compilejs2 = (list) ->
+  return compilejs(list) if list.filter((e) -> {rll:true,inn:true,inc:true}[e[0]] ).length != 0
+  stack = []
+  dups = 0
+  pops = 0
+  noout = {otn:true,otc:true,ptri:true,swti:true,ptr:true,ptri:true,dup2:true}
+  for i in list
+    pre = {
+      psh : 0, pop : 1,
+      add : 2, sub : 2, mul : 2,
+      div : 2, mod : 2, not : 1,
+      gth : 2, ptr : 1, swt : 1,
+      ptri: 0, swti: 0,
+      dup : 1, otn : 1, otc : 1
+    }[i[0]]
+    if pre != undefined
+      args = []
+      c = 0
+      while c < pre
+        n = stack[stack.length-1-c]
+        if n == undefined
+          n = [false,"pops[#{pops++}]"]
+        unless noout[n[0]]
+          console.log "for", i, n
+          stack.splice(stack.length-1-c,1)
+        args.unshift n[1]
+        c++
+      console.log "args", i, args
+      stack.push [i[0], {
+        psh : "#{i[1]}",   pop : '{0}',
+        add : '{0}+{1}',   sub : '{0}-{1}', mul : '{0}*{1}',
+        div : '{0}/{1}|0', mod : '{0}%{1}', not : '{0} ? 0 : 1',
+        gth : '({0} < {1}) ? 1 : 0',
+        ptr : 'dp = (dp + {0}) % 4',
+        ptri: "dp = (dp + #{i[1]}) % 4",
+        swt : 'cc = ({0} % 2 == 0) ? cc : -cc',
+        swti: 'cc = -cc',
+        dup : "dups[#{dups}] = {0}",
+        otn : 'io.out({0}.toString())',
+        otc : 'io.out(String.fromCharCode({0}))'
+      }[i[0]].format(args...)]
+      stack.push ["dup2", "dups[#{dups++}]"] if i[0] == "dup"
+  console.log "stack", stack
+  out = "(function(data,stack,curr,dp,cc) {\n\t"
+  out += "var dups = [];\n\t" unless dups == 0
+  out += "var pops = stack.stack.splice(-#{pops},#{pops});\n\t" unless pops == 0
+  out + stack.map(
+    (e) -> if noout[e[0]] then e[1] else "stack.push(#{e[1]})"
+  ).join(";\n\t") + ";\n\n\treturn [dp,cc];\n})"
+
 
 neighbours = (grid, x, y) -> ((grid[yi] or [])[xi] for [xi,yi] in [[x-1,y], [x+1,y], [x,y-1], [x,y+1]]).select (e) -> e
 
@@ -205,19 +264,17 @@ dpwise = (data, c, dp) ->
 
 findexit = (data, block, dp, cc) ->
   list = []
-  count = 0
-  for count in [0..8]
+  for count in [0..7]
     succ = corner block.codels, dp, cc
     curr = dpwise data, succ, dp
-    return [curr,list,dp,cc] if curr and not curr.black
+    if curr and not curr.black
+      list.push ["ptri", count/2|0] if count > 1
+      list.push ["swti", 1] if (count+1)&2
+      return [curr,list,dp,cc]
     if count % 2 == 0
       cc = -cc
-      list.push ["psh", 1,"+"]
-      list.push ["swt", 1,"+"]
     else
       dp = (dp + 1) % 4
-      list.push ["psh", 1,"+"]
-      list.push ["ptr", 1,"+"]
   return [false]
 
 compile = (data, curr, last, dp, cc) ->
@@ -237,32 +294,28 @@ compile = (data, curr, last, dp, cc) ->
       seen = []
       succ = curr
       last = curr
+      count = 0
       loop
-        #console.log "curr", way(dp), curr.pos
         while cand = dpwise(data, succ, dp) and cand and cand.label == succ.label
           succ = cand
-        #console.log succ
-        #return {list:list} if _.contains seen, succ
         curr = dpwise data, succ, dp
         if curr and not curr.black
-          #console.log "breaking", curr.pos
           break
         cc = -cc
-        sect.list.push ["psh", 1,"*"]
-        sect.list.push ["swt", 1,"*"]
-        
         dp = (dp + 1) % 4
-        sect.list.push ["psh", 1,"*"]
-        sect.list.push ["ptr", 1,"*"]
         
         seen.push succ
+        count++
+      sect.list.push ["ptri", count % 4] if count % 4 != 0
+      sect.list.push ["swti", 1] if count % 2 != 0
     else
       if not last.white
         ins = inst last, curr
-        sect.list.push [ins, last.count]
+        count = if ins == 'psh' then last.count else 1
+        sect.list.push [ins, count]
       else
         sect.list.push ["nop"]
-      if ins == 'ptr' or ins == 'swt' or ins == 'inn'
+      if ins == 'ptr' or ins == 'swt' or ins == 'inn' or ins == 'inc'
         sect.terminal = block
         return new SectSlice data, sect, 0
       else
@@ -287,11 +340,11 @@ piet_eval = (data) ->
 
 peval = (data, stack, curr, dp, cc) ->
   while true
-    debug "pre", stack, dp, cc
+    console.log "pre", stack, dp, cc
     ret = curr.js data, stack, curr, dp, cc
     return unless ret
     [dp,cc] = ret
-    debug "post", stack, dp, cc
+    console.log "post", stack, dp, cc
     
     term = curr.terminal()
     return unless term
