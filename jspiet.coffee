@@ -2,6 +2,8 @@ io    = null
 debug = null
 _ = null unless 'undefined' == typeof module
 
+util = require 'util'
+
 unless 'undefined' == typeof module
   _ = require 'underscore'
   module.exports = exports = (opt) ->
@@ -41,11 +43,15 @@ class SectSlice
 
   list: -> @ref.list[@index..-1].concat (@next and @next.list() or [])
   terminal: -> @ref.terminal
+  slow_js: (data, stack, curr, dp, cc) ->
+    @slow_js = eval compilejs(@list())
+    @slow_js data, stack, curr, dp, cc
+
   js: (data, stack, curr, dp, cc) ->
     source = compilejs2(@list())
     debug "list", @list()
     #debug "sourco", compilejs(@list())
-    console.log "source", source
+    debug "source", source
     @js = eval source
     @js data, stack, curr, dp, cc
 
@@ -171,13 +177,70 @@ return',
 
 compilejs = (list) -> "(function(data,stack,curr,dp,cc) {\n" + list.map((i) -> "\t" + jsinst(i)).join(";\n") + ";\n\n\treturn [dp,cc];\n})"
 
+class Node
+  constructor: (inst,children) ->
+    @inst = inst
+    @chld = children or []
+    @taint = {
+      gen:true,
+      ptr:true,ptri:true,
+      swt:true,swti:true
+      otc:true,otn:true
+      inc:true,inn:true
+    }[@inst[0]] or children.filter(
+      (e) -> e.taint
+    ).length != 0
+
+  format: (seen) ->
+    #console.log "format", this
+    {
+      psh : "#{@inst[1]}", pop : '{0}',
+      add : '{0}+{1}',     sub : '{0}-{1}',      mul : '{0}*{1}',
+      div : '{0}/{1}|0',   mod : '{0}.mod({1})', not : '{0} ? 0 : 1',
+      gth : '({0} > {1}) ? 1 : 0',
+      ptr : 'dp = (dp + {0}).mod(4)',
+      ptri: "dp = (dp + #{@inst[1]}) % 4",
+      swt : 'cc = ({0} % 2 == 0) ? cc : -cc',
+      swti: 'cc = -cc',
+      dup : '{0}',
+      otn : 'io.out({0}.toString())',
+      otc : 'io.out(String.fromCharCode({0}))'
+      inn : 'io.get(["input"], function (err, result) {\n\t\t
+if (err) { return 1; }\n\t\t
+stack.unshift(parseInt(result.input));\n\t\t
+peval(data,stack,curr.terminal().exit(dp,cc),dp,cc);\n\t
+});return;\n\t',
+      inc : 'io.get(["input"], function (err, result) {\n\t\t
+if (err) { return 1; }\n\t\t
+stack.unshift(result.input.charCodeAt(0));\n\t\t
+peval(data,stack,curr.terminal().exit(dp,cc),dp,cc);\n\t
+});return;\n\t',
+      gen : @inst[1]
+    }[@inst[0]].format(@chld.map((e) -> flatten(e, seen))...)
+
+flatten = (inst, seen) ->
+  debug "flatten", inst
+  if inst.dup
+    if seen[inst.dup]
+      "dups[#{inst.dup}]"
+    else
+      seen[inst.dup] = true
+      "dups[#{inst.dup}] = #{inst.format(seen)}"
+  else if not inst.taint
+    result = inst.format(seen)
+    debug result
+    eval result
+  else
+    inst.format seen
+
 compilejs2 = (list) ->
-  return compilejs(list) if list.filter((e) -> {rll:true,inn:true,inc:true}[e[0]] ).length != 0
+  #return compilejs(list) if list.filter((e) -> {rll:true}[e[0]] ).length != 0
   stack = []
+  output = []
   dups = 0
   pops = 0
   seen = []
-  noout = {otn:true,otc:true,ptri:true,swti:true,ptr:true,ptri:true}
+  noout = {otn:true,otc:true,ptri:true,swti:true,ptr:true,ptri:true,inn:true,inc:true}
   for i in list
     debug "i", i, stack
     pre = {
@@ -185,51 +248,53 @@ compilejs2 = (list) ->
       add : 2, sub : 2, mul : 2,
       div : 2, mod : 2, not : 1,
       gth : 2, ptr : 1, swt : 1,
-      ptri: 0, swti: 0,
+      ptri: 0, swti: 0, rll : 2,
+      inn : 0, inc : 0,
       dup : 1, otn : 1, otc : 1
     }[i[0]]
     if pre != undefined
       args = []
-      c = 0
-      while args.length < pre
-        n = stack[stack.length-1-c]
-        if n == undefined
-          n = [false,"pops[#{pops++}]"]
-        if noout[n[0]]
-          c++
-        else
-          debug "for", i, n
-          stack.splice(stack.length-1-c,1)
-          args.unshift if n[0] == "dup" and not seen[n[2]]
-            seen[n[2]] = true
-            "dups[#{n[2]}] = #{n[1]}"
-          else
-            n[1]
+      for j in [0...pre]
+        n = stack.pop()
+        n = new Node(["gen","pops[#{pops++}]"]) if n == undefined
+        args.unshift n
+
       debug "args", i, args
-      stack.push [i[0], {
-        psh : "#{i[1]}",   pop : '{0}',
-        add : '{0}+{1}',   sub : '{0}-{1}', mul : '{0}*{1}',
-        div : '{0}/{1}|0', mod : '{0}.mod({1})', not : '{0} ? 0 : 1',
-        gth : '({0} > {1}) ? 1 : 0',
-        ptr : 'dp = (dp + {0}).mod(4)',
-        ptri: "dp = (dp + #{i[1]}) % 4",
-        swt : 'cc = ({0} % 2 == 0) ? cc : -cc',
-        swti: 'cc = -cc',
-        dup : '{0}',
-        otn : 'io.out({0}.toString())',
-        otc : 'io.out(String.fromCharCode({0}))'
-      }[i[0]].format(args...)]
+
+      node = new Node(i, args)
+      if i[0] == "rll"
+        debug "Roll?", i, util.inspect(node,true,10), stack
+        return compilejs(list) if node.taint #or stack.length < d
+        d = flatten node.chld[0], []
+        t = flatten node.chld[1], []
+        diff = _.min [0, stack.length - d]
+        stack.unshift(new Node ["gen","pops[#{pops++}]"]) for j in [0...diff]
+        debug "ROLL ME", d, t
+        if t>=0
+          stack.splice(stack.length-d,0,stack.pop()) for j in [0...t]
+        else
+          stack.push(stack.splice(stack.length-d,1)[0]) for j in [0...-t]
+      else if noout[i[0]]
+        output.push node
+      else
+        stack.push node
+        
       if i[0] == "dup"
-        stack[stack.length-1][2] = dups++
+        stack[stack.length-1].dup = dups++
         stack.push stack[stack.length-1]
-      #stack.push ["dup2", "dups[#{dups++}]"] if i[0] == "dup"
-  debug "stack", stack
-  out = "(function(data,stack,curr,dp,cc) {\n\tdebug('POPS',#{pops},'<=',stack.length);"
+
+  debug("stack", s.inst, s.chld) for s in stack
+
+  out = "(function(data,stack,curr,dp,cc) {\n\t
+if (stack.length < #{pops}) { return this.slow_js(data,stack,curr,dp,cc); }\n\t"
   out += "var dups = [];\n\t" unless dups == 0
   out += "var pops = stack.splice(0,#{pops});\n\t" unless pops == 0
+
   out + stack.map(
-    (e) -> if noout[e[0]] then e[1] else "stack.unshift(#{e[1]})"
-  ).join(";\n\t") + ";\n\n\treturn [dp,cc];\n})"
+    (e) -> "stack.unshift(#{flatten(e,seen)})"
+  ).concat(output.map(
+    (e) -> flatten(e,seen)
+  )).join(";\n\t") + ";\n\n\treturn [dp,cc];\n})"
 
 
 way = (dp) -> dp % 2
