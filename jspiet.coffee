@@ -12,10 +12,11 @@ unless 'undefined' == typeof module
     {create:create, eval:piet_eval}
 
 Number.prototype.mod = (n) -> ((this%n)+n)%n
-String.prototype.format = ->
-  args = arguments
-  this.replace /{(\d+)}/g, (match, number) ->
+String.prototype.format = (args) ->
+  this.replace(/{(\d+)}/g, (match, number) ->
     if typeof args[number] isnt 'undefined' then "(#{args[number]})" else match
+  ).replace /{(.)}/g, (match, sym) ->
+    args.join sym
 
 class Codel
   constructor: (hue, light, bw) ->
@@ -67,7 +68,6 @@ class Block
     if not @exits[i]
       [next, app] = findexit @data, this, dp, cc
       
-      #TODO ugly
       slice =  compile @data, next, @any, dp, cc
       @exits[i] = new SectSlice @data, {list:app, terminal:slice.terminal()}
       @exits[i].next = slice
@@ -181,27 +181,19 @@ class Node
   constructor: (inst,children) ->
     @inst = inst
     @chld = children or []
-    @taint = {
-      gen:true,
-      ptr:true,ptri:true,
-      swt:true,swti:true
-      otc:true,otn:true
-      inc:true,inn:true
-    }[@inst[0]] or children.filter(
+    @taint = @inst[0] == "gen" or @inst[0][0] == "i" or children.filter(
       (e) -> e.taint
     ).length != 0
 
   format: (seen) ->
-    #console.log "format", this
+    debug "format", this
     {
-      psh : "#{@inst[1]}", pop : '{0}',
+      psh : "#{@inst[1]}",
       add : '{0}+{1}',     sub : '{0}-{1}',      mul : '{0}*{1}',
       div : '{0}/{1}|0',   mod : '{0}.mod({1})', not : '{0} ? 0 : 1',
       gth : '({0} > {1}) ? 1 : 0',
-      ptr : 'dp = (dp + {0}).mod(4)',
-      ptri: "dp = (dp + #{@inst[1]}) % 4",
-      swt : 'cc = ({0} % 2 == 0) ? cc : -cc',
-      swti: 'cc = -cc',
+      ptr : '{0}',         ptri: "#{@inst[1]}",
+      swt : '{0}',         swti: '1',
       dup : '{0}',
       otn : 'io.out({0}.toString())',
       otc : 'io.out(String.fromCharCode({0}))'
@@ -209,14 +201,15 @@ class Node
 if (err) { return 1; }\n\t\t
 stack.unshift(parseInt(result.input));\n\t\t
 peval(data,stack,curr.terminal().exit(dp,cc),dp,cc);\n\t
-});return;\n\t',
+});\n\treturn;\n\t',
       inc : 'io.get(["input"], function (err, result) {\n\t\t
 if (err) { return 1; }\n\t\t
 stack.unshift(result.input.charCodeAt(0));\n\t\t
 peval(data,stack,curr.terminal().exit(dp,cc),dp,cc);\n\t
-});return;\n\t',
-      gen : @inst[1]
-    }[@inst[0]].format(@chld.map((e) -> flatten(e, seen))...)
+});\n\treturn;\n\t',
+      gen : @inst[1],
+      join: '{+}'
+    }[@inst[0]].format(@chld.map((e) -> flatten(e, seen)))
 
 flatten = (inst, seen) ->
   debug "flatten", inst
@@ -228,7 +221,7 @@ flatten = (inst, seen) ->
       "dups[#{inst.dup}] = #{inst.format(seen)}"
   else if not inst.taint
     result = inst.format(seen)
-    debug result
+    debug "result", result
     eval result
   else
     inst.format seen
@@ -236,7 +229,10 @@ flatten = (inst, seen) ->
 compilejs2 = (list) ->
   #return compilejs(list) if list.filter((e) -> {rll:true}[e[0]] ).length != 0
   stack = []
+  ccs = []
+  dps = []
   output = []
+  terms = null
   dups = 0
   pops = 0
   seen = []
@@ -262,22 +258,32 @@ compilejs2 = (list) ->
       debug "args", i, args
 
       node = new Node(i, args)
-      if i[0] == "rll"
-        debug "Roll?", i, util.inspect(node,true,10), stack
-        return compilejs(list) if node.taint #or stack.length < d
-        d = flatten node.chld[0], []
-        t = flatten node.chld[1], []
-        diff = _.min [0, stack.length - d]
-        stack.unshift(new Node ["gen","pops[#{pops++}]"]) for j in [0...diff]
-        debug "ROLL ME", d, t
-        if t>=0
-          stack.splice(stack.length-d,0,stack.pop()) for j in [0...t]
+      switch i[0]
+        when 'rll'
+          debug "Roll?", i, util.inspect(node,true,10), stack
+          return compilejs(list) if node.taint
+          d = flatten node.chld[0], []
+          t = flatten node.chld[1], []
+          diff = _.min [0, stack.length - d]
+          stack.unshift(new Node ["gen","pops[#{pops++}]"]) for j in [0...diff]
+          debug "ROLL ME", d, t
+          if t>=0
+            stack.splice(stack.length-d,0,stack.pop()) for j in [0...t]
+          else
+            stack.push(stack.splice(stack.length-d,1)[0]) for j in [0...-t]
+        when 'otn', 'otc'
+          output.push node
+        when 'ptr', 'ptri'
+          dps.push node
+        when 'swt', 'swti'
+          ccs.push node
+        when 'inn', 'inc'
+          throw "INVALID INPUT" if term
+          term = node
+        when 'pop'
+          #Delete
         else
-          stack.push(stack.splice(stack.length-d,1)[0]) for j in [0...-t]
-      else if noout[i[0]]
-        output.push node
-      else
-        stack.push node
+          stack.push node
         
       if i[0] == "dup"
         stack[stack.length-1].dup = dups++
@@ -290,11 +296,18 @@ if (stack.length < #{pops}) { return this.slow_js(data,stack,curr,dp,cc); }\n\t"
   out += "var dups = [];\n\t" unless dups == 0
   out += "var pops = stack.splice(0,#{pops});\n\t" unless pops == 0
 
-  out + stack.map(
+  out += stack.map(
     (e) -> "stack.unshift(#{flatten(e,seen)})"
   ).concat(output.map(
     (e) -> flatten(e,seen)
-  )).join(";\n\t") + ";\n\n\treturn [dp,cc];\n})"
+  )).join(";\n\t")
+  dpn = new Node ["join"], dps
+  totaldps = flatten dpn, seen
+  out += ";\n\tdp = (dp + (#{totaldps})).mod(4) //" + dpn.taint + "\n" if totaldps
+  totalccs = flatten new Node(["join"], ccs), seen
+  out += ";\n\tcc = (#{totalccs}).mod(2) == 0 ? cc : -cc" if totalccs
+  out += if term then flatten(term, seen) else "\n\t\treturn [dp,cc]"
+  out + "\n})"
 
 
 way = (dp) -> dp % 2
@@ -396,7 +409,7 @@ piet_eval = (data) ->
 peval = (data, stack, curr, dp, cc) ->
   while true
     debug "pre", stack, dp, cc
-    debug curr.js.toString()
+    debug "curr", curr.js.toString()
     ret = curr.js data, stack, curr, dp, cc
     return unless ret
     [dp,cc] = ret
