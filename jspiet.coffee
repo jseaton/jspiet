@@ -87,7 +87,7 @@ parse = (n) -> new Codel {
 
 parse_ppm = (file) ->
   [width, height] = file.match(/^(\d+) (\d+)$/m).slice(1,3)
-  list = file.match(/\d+ +\d+ +\d+/g).map(parse)
+  list = file.replace(/^P3\n/,'').replace(/^#.*\n/m,'').replace(/^\d+ \d+\n/m,'').replace(/^\d+/,'').match(/\d+\s+\d+\s+\d+/g).map(parse)
   data = []
   for i in [0 ... height]
     data.push list.splice(0, width)
@@ -175,17 +175,21 @@ return',
     otc : 'io.out(String.fromCharCode(stack.shift()))'
   }[inst[0]]
 
-compilejs = (list) -> "(function(data,stack,curr,dp,cc) {\n" + list.map((i) -> "\t" + jsinst(i)).join(";\n") + ";\n\n\treturn [dp,cc];\n})"
+compilejs = (list) -> "(function(data,stack,curr,dp,cc) {\n" + list.map((i) -> "\tdebug('#{i}',stack,dp,cc);\n\t" + jsinst(i)).join(";\n") + ";\n\n\treturn [dp,cc];\n})"
 
 class Node
   constructor: (inst,children) ->
     @inst = inst
     @chld = children or []
-    @taint = @inst[0] == "gen" or @inst[0][0] == "i" or children.filter(
+    @taint = {
+      gen:true,
+      inn:true,inc:true,
+      otn:true,otc:true
+    }[@inst[0]] or children.filter(
       (e) -> e.taint
     ).length != 0
 
-  format: (seen) ->
+  format: (seen, dups) ->
     debug "format", this
     {
       psh : "#{@inst[1]}",
@@ -209,22 +213,27 @@ peval(data,stack,curr.terminal().exit(dp,cc),dp,cc);\n\t
 });\n\treturn;\n\t',
       gen : @inst[1],
       join: '{+}'
-    }[@inst[0]].format(@chld.map((e) -> flatten(e, seen)))
+    }[@inst[0]].format(@chld.map((e) -> flatten(e, seen, dups)))
 
-flatten = (inst, seen) ->
+flatten = (inst, seen, dups) ->
   debug "flatten", inst
   if inst.dup
-    if seen[inst.dup]
+    if not inst.taint
+      if dups[inst.dup] != undefined
+        dups[inst.dup]
+      else
+        flatten inst.chld[0], seen, dups
+    else if seen[inst.dup]
       "dups[#{inst.dup}]"
     else
       seen[inst.dup] = true
-      "dups[#{inst.dup}] = #{inst.format(seen)}"
+      "dups[#{inst.dup}] = #{inst.format(seen, dups)}"
   else if not inst.taint
-    result = inst.format(seen)
+    result = inst.format(seen, dups)
     debug "result", result
     eval result
   else
-    inst.format seen
+    inst.format seen, dups
 
 compilejs2 = (list) ->
   #return compilejs(list) if list.filter((e) -> {rll:true}[e[0]] ).length != 0
@@ -233,7 +242,8 @@ compilejs2 = (list) ->
   dps = []
   output = []
   terms = null
-  dups = 0
+  dupn = 0
+  dups = []
   pops = 0
   seen = []
   noout = {otn:true,otc:true,ptri:true,swti:true,ptr:true,ptri:true,inn:true,inc:true}
@@ -262,8 +272,8 @@ compilejs2 = (list) ->
         when 'rll'
           debug "Roll?", i, util.inspect(node,true,10), stack
           return compilejs(list) if node.taint
-          d = flatten node.chld[0], []
-          t = flatten node.chld[1], []
+          d = flatten node.chld[0], [], dups
+          t = flatten node.chld[1], [], dups
           diff = _.min [0, stack.length - d]
           stack.unshift(new Node ["gen","pops[#{pops++}]"]) for j in [0...diff]
           debug "ROLL ME", d, t
@@ -286,7 +296,7 @@ compilejs2 = (list) ->
           stack.push node
         
       if i[0] == "dup"
-        stack[stack.length-1].dup = dups++
+        stack[stack.length-1].dup = dupn++
         stack.push stack[stack.length-1]
 
   debug("stack", s.inst, s.chld) for s in stack
@@ -297,16 +307,16 @@ if (stack.length < #{pops}) { return this.slow_js(data,stack,curr,dp,cc); }\n\t"
   out += "var pops = stack.splice(0,#{pops});\n\t" unless pops == 0
 
   out += stack.map(
-    (e) -> "stack.unshift(#{flatten(e,seen)})"
+    (e) -> "stack.unshift(#{flatten(e,seen,dups)})"
   ).concat(output.map(
-    (e) -> flatten(e,seen)
+    (e) -> flatten(e,seen,dups)
   )).join(";\n\t")
   dpn = new Node ["join"], dps
-  totaldps = flatten dpn, seen
+  totaldps = flatten dpn, seen, dups
   out += ";\n\tdp = (dp + (#{totaldps})).mod(4) //" + dpn.taint + "\n" if totaldps
-  totalccs = flatten new Node(["join"], ccs), seen
+  totalccs = flatten new Node(["join"], ccs), seen, dups
   out += ";\n\tcc = (#{totalccs}).mod(2) == 0 ? cc : -cc" if totalccs
-  out += if term then flatten(term, seen) else "\n\t\treturn [dp,cc]"
+  out += if term then ";\n\t" + flatten(term, seen, dups) else "\n\t\treturn [dp,cc]"
   out + "\n})"
 
 
@@ -319,7 +329,7 @@ edge = (list, dp) ->
 
 ccmost = (list, dp, cc, max) ->
   maxes = list.filter (e) -> e.pos[way(dp)] == max.pos[way(dp)]
-  _.max maxes, (e) -> e.pos[1-way(dp)] * cc * sgn(dp)
+  _.max maxes, (e) -> e.pos[1-way(dp)] * cc * [1,-1,-1,1][dp]
 
 corner = (list, dp, cc) ->
   max = edge list, dp
@@ -422,6 +432,7 @@ peval = (data, stack, curr, dp, cc) ->
 
 create = (file) ->
   data = parse_ppm file
+  debug "data", data.grid[0]
   data.blocks = (new Block(data, c) for c in fill(data))
   data
 
